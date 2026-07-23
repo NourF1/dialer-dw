@@ -1,0 +1,33 @@
+# Security & Credentials
+*.json
+keys/
+gcp_key.json
+.env
+.env.local
+
+# Airflow
+airflow/logs/
+airflow/airflow.db
+airflow/airflow.cfg
+airflow/webserver_config.py
+airflow/plugins/__pycache__/
+
+# dbt
+dbt_project/target/
+dbt_project/dbt_packages/
+dbt_project/logs/
+profiles.yml
+
+# Python / Environment
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+.pytest_cache/
+
+# OS & IDE
+.DS_Store
+.idea/
+.vscode/
