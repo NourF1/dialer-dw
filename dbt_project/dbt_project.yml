@@ -1,0 +1,25 @@
+name: 'dialer_dw'
+version: '1.0.0'
+config-version: 2
+
+# This setting configures which 'profile' dbt uses from profiles.yml
+profile: 'dialer_dw'
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# Configuring models
+models:
+  dialer_dw:
+    staging:
+      +materialized: view
+    marts:
+      +materialized: table
