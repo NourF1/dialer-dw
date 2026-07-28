@@ -4,8 +4,20 @@ dialer_dw:
     dev:
       type: bigquery
       method: service-account
-      project: dialer-dw-prod
-      dataset: dbt_staging
+      project: "{{ env_var('GCP_PROJECT_ID') }}"
+      dataset: "{{ env_var('DBT_DATASET', 'dialer_dw_dev') }}"
+      keyfile: "{{ env_var('GCP_KEY_PATH') }}"
       threads: 4
-      keyfile: /opt/airflow/keys/gcp_key.json
       location: US
+      priority: interactive
+      job_retries: 1
+    prod:
+      type: bigquery
+      method: service-account
+      project: "{{ env_var('GCP_PROJECT_ID') }}"
+      dataset: dialer_dw
+      keyfile: "{{ env_var('GCP_KEY_PATH') }}"
+      threads: 8
+      location: US
+      priority: interactive
+      job_retries: 2
