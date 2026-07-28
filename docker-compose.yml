@@ -6,12 +6,14 @@ x-airflow-common:
   environment:
     &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
-    AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     GCP_KEY_PATH: /opt/airflow/keys/gcp_key.json
     GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/keys/gcp_key.json
+    DBT_PROFILES_DIR: /opt/airflow/dbt_project
+    DBT_PROJECT_DIR: /opt/airflow/dbt_project
   volumes:
     - ./airflow/dags:/opt/airflow/dags
     - ./airflow/logs:/opt/airflow/logs
@@ -66,10 +68,12 @@ services:
   airflow-init:
     <<: *airflow-common
     command: version
-    # depends_on inherited from anchor = postgres healthy
     environment:
       <<: *airflow-common-env
       _AIRFLOW_DB_UPGRADE: 'true'
       _AIRFLOW_WWW_USER_CREATE: 'true'
       _AIRFLOW_WWW_USER_USERNAME: airflow
       _AIRFLOW_WWW_USER_PASSWORD: airflow
+
+volumes:
+  postgres-db-volume:
