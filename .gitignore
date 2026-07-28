@@ -16,7 +16,6 @@ airflow/plugins/__pycache__/
 dbt_project/target/
 dbt_project/dbt_packages/
 dbt_project/logs/
-profiles.yml
 
 # Python / Environment
 __pycache__/

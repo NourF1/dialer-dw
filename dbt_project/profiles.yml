@@ -1,0 +1,11 @@
+dialer_dw:
+  target: dev
+  outputs:
+    dev:
+      type: bigquery
+      method: service-account
+      project: dialer-dw-prod
+      dataset: dbt_staging
+      threads: 4
+      keyfile: /opt/airflow/keys/gcp_key.json
+      location: US
