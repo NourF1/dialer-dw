@@ -1,0 +1,15 @@
+# Pinned to the versions validated in apache/airflow:2.8.1-python3.10.
+# To refresh after a base-image bump:
+#   docker compose run --rm --no-deps scheduler bash -c "pip freeze | grep -iE '^(dbt|google-cloud-bigquery|apache-airflow-providers-google|requests|tenacity)'"
+
+# dbt
+dbt-core==1.12.0
+dbt-bigquery==1.12.0
+
+# GCP
+google-cloud-bigquery==3.16.0
+apache-airflow-providers-google==10.13.1
+
+# ReadyMode extractor
+requests==2.34.2
+tenacity==8.2.3
