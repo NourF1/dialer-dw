@@ -1,7 +1,9 @@
 # Security & Credentials
-*.json
 keys/
-gcp_key.json
+*-key.json
+*_key.json
+credentials*.json
+service-account*.json
 .env
 .env.local
 
