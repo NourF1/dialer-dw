@@ -21,5 +21,10 @@ models:
   dialer_dw:
     staging:
       +materialized: view
+      +schema: staging
+    intermediate:
+      +materialized: ephemeral
+      +schema: intermediate
     marts:
       +materialized: table
+      +schema: marts
