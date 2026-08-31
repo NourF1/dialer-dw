@@ -1,0 +1,1 @@
+"""ReadyMode → BigQuery extraction package."""
