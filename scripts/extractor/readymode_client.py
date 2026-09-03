@@ -12,21 +12,37 @@ BOUNDARY: this module knows about HTTP and ReadyMode's HTML/CSV. It knows
 nothing about BigQuery, Airflow, or dbt. If you ever need to import
 google.cloud here, the boundary has been crossed.
 
-Build status: chunk 1 of 3 — skeleton + authentication.
-  TODO chunk 2: fetch_call_log() and fetch_dialer_report()
+Build status: chunk 2 of 3 — authentication + fetchers.
   TODO chunk 3: tenacity retries + schema-drift detection
 """
 from __future__ import annotations
 
-import csv  # noqa: F401  (used in chunk 2)
-import io  # noqa: F401  (used in chunk 2)
-import re  # noqa: F401  (used in chunk 2)
-from datetime import date  # noqa: F401  (used in chunk 2)
+import csv
+import io
+import logging
+import re
+from datetime import date, timedelta
 
 import requests
 
+logger = logging.getLogger(__name__)
+
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36")
+
+# Call-result type ids that are checked by default on the Call Log report; sending
+# them all means the export covers every disposition.
+CALL_RESULT_TYPES = ["6", "-2", "3", "141", "1", "2", "5", "7", "138", "139", "-1"]
+
+# Exact export field keys for the "dispo" template (id 13), captured from the
+# ExportMenu. Order defines CSV column order.
+DISPO_FIELDS = [
+    ("Original campaign", "Original campaign"),
+    ("Current campaign", "Current campaign"),
+    ("u.u_name", "Agent name"),
+    ("Log Type", "Log Type"),
+    ("Log Time (Date)", "Log Time (Date)"),
+]
 
 
 class LoginError(RuntimeError):
@@ -43,6 +59,15 @@ class ReadymodeFormatError(RuntimeError):
 
     Means the parser needs updating. Retrying will not help.
     """
+
+
+def _mmddyyyy(d: date) -> str:
+    return d.strftime("%m/%d/%Y")
+
+
+def _cells(row_html: str) -> list[str]:
+    return [re.sub(r"<[^>]+>", "", c).strip()
+            for c in re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", row_html, re.S)]
 
 
 class ReadymodeClient:
@@ -110,9 +135,133 @@ class ReadymodeClient:
 
         self._session = s
 
+    def _require_session(self) -> requests.Session:
+        """Guard function: ensures login() was called prior to fetching reports."""
+        if self._session is None:
+            raise LoginError("Must call login() before attempting to fetch reports.")
+        return self._session
+
+    def _verify_session_alive(self, response_text: str) -> None:
+        """Detect if session expired and ReadyMode redirected/rendered the login screen."""
+        lowered = response_text.lower()
+        if "login_account" in lowered or "login_password" in lowered:
+            raise LoginError("Session expired or invalid — server returned login page instead of requested report.")
+
+    def fetch_call_log(self, day: date) -> list[dict]:
+        """Fetch call log dispositions for `day`, returning raw list[dict]."""
+        s = self._require_session()
+        d = _mmddyyyy(day)
+        xhr = {"X-Requested-With": "XMLHttpRequest", "Referer": f"{self.base}/+CCS Reports/call_log"}
+
+        # 1) Set the session's Call Log date range (the export inherits it).
+        form = [
+            ("update", "1"),
+            ("report[time_from_d]", d), ("report[time_from_dateonly]", "1"),
+            ("report[time_to_d]", d), ("report[time_to_dateonly]", "1"),
+            ("report[page]", "0"),
+            ("report[restrict_uid]", "0"), ("report[restrict_campaign]", "0"),
+            ("report[restrict_batch]", "0"), ("report[sourceFilter]", "-1"),
+            ("report[durationFilter]", "-1"), ("report[callTypeFilter]", "_"),
+        ] + [("report[types][]", t) for t in CALL_RESULT_TYPES]
+
+        update_res = s.post(f"{self.base}/+CCS Reports/call_log/update", data=form, headers=xhr)
+        self._verify_session_alive(update_res.text)
+
+        # 2) Stream the CSV export with the dispo fields.
+        payload = [("fieldList[keys][]", k) for k, _ in DISPO_FIELDS] + \
+                  [("fieldList[names][]", n) for _, n in DISPO_FIELDS]
+        r = s.post(f"{self.base}/+CCS Reports/call_log/ExportMenu/CL.csv", data=payload,
+                   headers={"Referer": f"{self.base}/+CCS Reports/call_log"})
+
+        self._verify_session_alive(r.text)
+
+        # Content-Type / HTML body verification: dead sessions return 200 OK with HTML markup
+        ctype = r.headers.get("Content-Type", "")
+        if "csv" not in ctype.lower() or r.text.lstrip().startswith("<!DOCTYPE") or r.text.lstrip().startswith("<html"):
+            raise ReadymodeFormatError(
+                f"Dispo CSV export did not return valid CSV (Content-Type={ctype!r}, len={len(r.text)}). "
+                "The Call Log export endpoint or dispo field keys likely changed."
+            )
+
+        # csv.DictReader preserves native structure/None values without string coercion
+        rows = list(csv.DictReader(io.StringIO(r.text)))
+        expected = {"Original campaign", "Log Type", "Log Time (Date)"}
+        if rows and not expected.issubset(set(rows[0].keys())):
+            raise ReadymodeFormatError(
+                f"Dispo CSV columns changed — got {list(rows[0].keys())}, expected to include {sorted(expected)}."
+            )
+
+        return rows
+
+    def fetch_dialer_report(self, day: date) -> list[dict]:
+        """Fetch per-campaign report for `day`, mapping all table columns by header name.
+
+        Lands all columns without value-based filtering. Drops rows strictly when
+        cell count does not match header count (structural mismatch) to prevent
+        misaligned columns.
+        """
+        s = self._require_session()
+        d = _mmddyyyy(day)
+        dialer = f"{self.base}/+CCS Reports/dialer"
+        r = s.post(dialer, data={"date_from": d, "date_to": d},
+                   headers={"X-Requested-With": "XMLHttpRequest", "Referer": dialer})
+
+        self._verify_session_alive(r.text)
+
+        rows = [_cells(rh) for rh in re.findall(r"<tr[^>]*>(.*?)</tr>", r.text, re.S)]
+        rows = [c for c in rows if c]
+        if not rows:
+            raise ReadymodeFormatError(
+                "Dialer report returned no table rows — the dialer endpoint or its "
+                "response layout likely changed (or the session was rejected)."
+            )
+
+        header = rows[0]
+        header_len = len(header)
+        header_lower = [h.lower() for h in header]
+
+        # Drift Detection: Ensure core pipeline columns exist in header
+        required_cols = {"playlist", "calls", "connects"}
+        missing = required_cols - set(header_lower)
+        if missing:
+            raise ReadymodeFormatError(
+                f"Dialer report header missing expected column(s) {missing}. "
+                f"Header was {header}. Readymode renamed a critical column."
+            )
+
+        out = []
+        structural_skips = 0
+
+        for cells_row in rows[1:]:
+            # Structural Guard: Mismatched column count cannot be aligned safely
+            if len(cells_row) != header_len:
+                structural_skips += 1
+                continue
+
+            # Map columns strictly by header name alignment
+            row_dict = {col_name: cell_val for col_name, cell_val in zip(header, cells_row) if col_name}
+            if row_dict:
+                out.append(row_dict)
+
+        if structural_skips > 0:
+            logger.warning(
+                "Skipped %d rows in dialer report due to structural cell count mismatch "
+                "(expected %d columns).",
+                structural_skips,
+                header_len,
+            )
+
+        # Fail loudly if structural format corrupts all table rows
+        if structural_skips > 0 and len(out) == 0:
+            raise ReadymodeFormatError(
+                f"Dialer report table structural mismatch: all {structural_skips} data rows "
+                f"had cell counts differing from the {header_len}-column header."
+            )
+
+        return out
+
 
 if __name__ == "__main__":
-    # Checkpoint 1 harness — remove once run_extract.py exists.
     import os
 
     client = ReadymodeClient(
@@ -122,3 +271,19 @@ if __name__ == "__main__":
     )
     client.login()
     print("login OK — session established")
+
+    target_day = date.today() - timedelta(days=1)
+    target_date_str = _mmddyyyy(target_day)
+
+    call_logs = client.fetch_call_log(target_day)
+    dialer_report = client.fetch_dialer_report(target_day)
+
+    print(f"Date {target_day}: {len(call_logs)} call log rows, {len(dialer_report)} dialer report rows.")
+
+    if call_logs:
+        log_dates = {r.get("Log Time (Date)", "").split()[0] for r in call_logs}
+        assert log_dates == {target_date_str}, (
+            f"Date range mutation failed! Expected records strictly for {target_date_str}, "
+            f"but retrieved dates: {log_dates}"
+        )
+        print(f"Acceptance check passed — all call log records belong strictly to {target_date_str}.")
