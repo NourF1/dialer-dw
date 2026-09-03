@@ -3,7 +3,7 @@ from datetime import date
 import pytest
 from google.cloud import bigquery
 
-from scripts.extractor.bq_loader import RawTableMissingError, load_partition
+from extractor.bq_loader import RawTableMissingError, load_partition
 
 # Sandbox test parameters
 PROJECT_ID = "dialer-dw-prod"
@@ -32,8 +32,8 @@ def query_partition_rows(client: bigquery.Client, extraction_date: date) -> list
 
 def test_bq_loader_validation_sequence(bq_client):
     # Setup test dates
-    scratch_date = date(2026, 9, 1)
-    second_date = date(2026, 9, 2)
+    scratch_date = date(2099, 9, 1)
+    second_date = date(2099, 9, 2)
     source = "readymode.call_log"
 
     # -------------------------------------------------------------------------
