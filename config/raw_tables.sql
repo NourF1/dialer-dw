@@ -28,7 +28,8 @@ PARTITION BY _extraction_date
 CLUSTER BY _source
 OPTIONS(
   description="Raw table holding verbatim API JSON payloads for Readymode call logs. Partitioned daily by business date. SANDBOX RETENTION: 60-day max expiry date.",
-  require_partition_filter = FALSE
+  require_partition_filter = FALSE,
+  partition_expiration_days = 60
 );
 
 -- -----------------------------------------------------------------------------
@@ -47,5 +48,6 @@ PARTITION BY _extraction_date
 CLUSTER BY _source
 OPTIONS(
   description="Raw table holding verbatim API JSON payloads for Readymode dialer reports. Partitioned daily by business date. SANDBOX RETENTION: 60-day max expiry date.",
-  require_partition_filter = FALSE
+  require_partition_filter = FALSE,
+  partition_expiration_days = 60
 );
