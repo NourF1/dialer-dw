@@ -1,0 +1,16 @@
+version: 2
+
+sources:
+  - name: readymode
+    description: "Raw API data ingested from ReadyMode dialer platform containing call logs and daily campaign performance metrics."
+    database: "{{ env_var('GCP_PROJECT_ID') }}"
+    schema: "{{ env_var('BQ_RAW_DATASET', 'dialer_dw_raw') }}"
+    loaded_at_field: _loaded_at
+    freshness:
+      warn_after:  {count: 2, period: hour}
+      error_after: {count: 6, period: hour}
+    tables:
+      - name: raw_call_log
+        description: "Verbatim JSON payloads for individual call log events from ReadyMode."
+      - name: raw_dialer_report
+        description: "Verbatim JSON payloads for daily campaign performance reports from ReadyMode."
