@@ -198,7 +198,8 @@ class ReadymodeClient:
 
         Lands all columns without value-based filtering. Drops rows strictly when
         cell count does not match header count (structural mismatch) to prevent
-        misaligned columns.
+        misaligned columns. If no rows are present, returns an empty list to allow
+        zero-row partition loads.
         """
         s = self._require_session()
         d = _mmddyyyy(day)
@@ -211,10 +212,11 @@ class ReadymodeClient:
         rows = [_cells(rh) for rh in re.findall(r"<tr[^>]*>(.*?)</tr>", r.text, re.S)]
         rows = [c for c in rows if c]
         if not rows:
-            raise ReadymodeFormatError(
-                "Dialer report returned no table rows — the dialer endpoint or its "
-                "response layout likely changed (or the session was rejected)."
+            logger.warning(
+                f"Dialer report returned no table rows for date={day.isoformat()}. "
+                "Treating as empty dataset (row_count=0)."
             )
+            return []
 
         header = rows[0]
         header_len = len(header)
