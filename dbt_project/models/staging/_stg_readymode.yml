@@ -1,0 +1,210 @@
+version: 2
+
+models:
+  - name: stg_readymode__call_log
+    description: >
+      Staging model for ReadyMode call log records.
+      Grain: One row = one call log event (identified by call_log_id).
+    tests:
+      - dbt_utils.expression_is_true:
+          expression: "date(logged_at) = _extraction_date"
+    columns:
+      # Metadata
+      - name: _extraction_date
+        description: Ingestion pipeline extraction date.
+        tests:
+          - not_null
+      - name: _loaded_at
+        description: Warehouse target load timestamp.
+        tests:
+          - not_null
+      - name: _batch_id
+        description: Ingestion batch identifier.
+        tests:
+          - not_null
+      - name: _source
+        description: System origin identifier.
+        tests:
+          - not_null
+
+      # Keys & Timestamps
+      - name: call_log_id
+        description: Unique primary key for the call log event.
+        tests:
+          - unique
+          - not_null
+
+      - name: logged_at
+        description: Precise event timestamp parsed from 'Log Time'.
+        tests:
+          - not_null
+
+      - name: call_date
+        description: Event date parsed from 'Log Time (Date)' in MM/DD/YYYY format.
+        tests:
+          - not_null
+
+      # Agent & Campaign Attributes
+      - name: agent_login
+        description: Unique persistent identifier for the agent (e.g., E26031163).
+        tests:
+          - not_null
+
+      - name: agent_name
+        description: Agent display name (e.g., Hany Emad).
+
+      - name: original_campaign
+        description: Campaign associated with the call when initiated.
+
+      - name: current_campaign
+        description: Campaign associated with the call at completion.
+
+      - name: call_type
+        description: Call execution method or direction (e.g., Dialer).
+
+      # Metrics & Dispositions
+      - name: log_type
+        description: Disposition result of the call.
+        tests:
+          - not_null
+          - accepted_values:
+              values:
+                - 'Voicemail'
+                - 'Not interested'
+                - 'Wrong Number'
+                - 'Do Not Call'
+                - 'Qualified Lead'
+                - 'Callback'
+              config:
+                severity: warn
+
+      - name: recording_seconds
+        description: >
+          Duration of the call recording in seconds. 
+          ReadyMode emits blank when not applicable; treated as 0 via post-cast COALESCE.
+        tests:
+          - not_null
+
+  - name: stg_readymode__dialer_report
+    description: >
+      Staging model for ReadyMode dialer performance report metrics.
+      Grain: One row per (_extraction_date, queue, playlist). 
+      Reflects daily snapshot metrics extracted per operational queue and playlist grouping.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - _extraction_date
+            - queue
+            - playlist
+    columns:
+      # Metadata
+      - name: _extraction_date
+        tests:
+          - not_null
+      - name: _loaded_at
+        tests:
+          - not_null
+      - name: _batch_id
+        tests:
+          - not_null
+      - name: _source
+        tests:
+          - not_null
+
+      # Dimensions
+      - name: week_raw
+        description: Raw range string extracted from ReadyMode 'Week' field (e.g., 'Sep 04 - Sep 04').
+        tests:
+          - not_null
+
+      - name: queue
+        description: Operations queue name.
+        tests:
+          - not_null
+
+      - name: playlist
+        description: Dialing playlist name (corresponds to campaign grouping in downstream models).
+        tests:
+          - not_null
+
+      # Numeric Volume Metrics
+      - name: avg_cpa
+        description: >
+          Average Cost Per Acquisition.
+          ReadyMode emits blank when not applicable; treated as 0 via post-cast COALESCE.
+        tests:
+          - not_null
+
+      - name: total_calls
+        description: Total call count recorded during the report window.
+        tests:
+          - not_null
+
+      - name: no_answer_count
+        description: >
+          Count of un-answered calls.
+          ReadyMode emits blank when not applicable; treated as 0 via post-cast COALESCE.
+        tests:
+          - not_null
+
+      - name: nis_count
+        description: >
+          Count of Number In Service / Not In Service flags.
+          ReadyMode emits blank when not applicable; treated as 0 via post-cast COALESCE.
+        tests:
+          - not_null
+
+      - name: answered_count
+        description: >
+          Count of answered calls.
+          ReadyMode emits blank when not applicable; treated as 0 via post-cast COALESCE.
+        tests:
+          - not_null
+
+      - name: machine_count
+        description: >
+          Count of calls answered by answering machines / automated systems.
+          ReadyMode emits blank when not applicable; treated as 0 via post-cast COALESCE.
+        tests:
+          - not_null
+
+      - name: connect_count
+        description: >
+          Count of successful human connections.
+          ReadyMode emits blank when not applicable; treated as 0 via post-cast COALESCE.
+        tests:
+          - not_null
+
+      - name: abandoned_count
+        description: >
+          Count of abandoned calls.
+          ReadyMode emits blank when not applicable; treated as 0 via post-cast COALESCE.
+        tests:
+          - not_null
+
+      # Ratio & Rate Metrics
+      - name: answer_rate
+        description: >
+          Fraction of calls answered (67% stored as 0.6700).
+          ReadyMode emits blank when not applicable; treated as 0 via post-cast COALESCE.
+        tests:
+          - not_null
+
+      - name: machine_rate
+        description: >
+          Fraction of answered calls hitting machines (91% stored as 0.9100).
+          ReadyMode emits blank when not applicable; treated as 0 via post-cast COALESCE.
+        tests:
+          - not_null
+
+      - name: calls_to_connect
+        description: >
+          Calls ÷ connects. NULL when connects = 0 (ReadyMode returns blank rather than dividing by zero) 
+          — meaning no connects that day, not missing data.
+
+      - name: abandoned_rate
+        description: >
+          Fraction of calls abandoned (1.15% stored as 0.0115).
+          ReadyMode emits blank when not applicable; treated as 0 via post-cast COALESCE.
+        tests:
+          - not_null

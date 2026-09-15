@@ -34,14 +34,28 @@ UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
 # them all means the export covers every disposition.
 CALL_RESULT_TYPES = ["6", "-2", "3", "141", "1", "2", "5", "7", "138", "139", "-1"]
 
-# Exact export field keys for the "dispo" template (id 13), captured from the
-# ExportMenu. Order defines CSV column order.
+# Exact export field keys for the "dispo" template, read from the live
+# ExportMenu (181 fields available). Keys for core call-log fields are the
+# label text itself; CCS_Profile.* keys are lead-profile attributes.
+#
+# DELIBERATELY EXCLUDED: every CCS_Profile.* field (phone, email, name,
+# address) and the Recording Local/Remote Phone fields. Those are real
+# consumers' PII belonging to a client, and none of the marts need them.
+#
+# Order defines CSV column order; rows are parsed by header name, so it is
+# cosmetic. "Log Time (Date)" is kept alongside "Log Time" for backward
+# compatibility with partitions loaded before 2026-09-14.
 DISPO_FIELDS = [
+    ("Call Log ID", "Call Log ID"),                                # primary key
     ("Original campaign", "Original campaign"),
     ("Current campaign", "Current campaign"),
-    ("u.u_name", "Agent name"),
+    ("u.u_name", "Agent name"),                                    # display name, can change
+    ("u.u_account", "Agent login"),                                # stable agent key
     ("Log Type", "Log Type"),
+    ("Log Time", "Log Time"),                                      # '09/14/2026 9:45:07 AM'
     ("Log Time (Date)", "Log Time (Date)"),
+    ("Call type", "Call type"),
+    ("Recording Length (Seconds)", "Recording Length (Seconds)"),  # numeric duration
 ]
 
 
@@ -185,7 +199,7 @@ class ReadymodeClient:
 
         # csv.DictReader preserves native structure/None values without string coercion
         rows = list(csv.DictReader(io.StringIO(r.text)))
-        expected = {"Original campaign", "Log Type", "Log Time (Date)"}
+        expected = {"Call Log ID", "Original campaign", "Log Type", "Log Time"}
         if rows and not expected.issubset(set(rows[0].keys())):
             raise ReadymodeFormatError(
                 f"Dispo CSV columns changed — got {list(rows[0].keys())}, expected to include {sorted(expected)}."

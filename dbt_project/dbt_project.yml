@@ -28,3 +28,10 @@ models:
     marts:
       +materialized: table
       +schema: marts
+
+# Configuration seeds
+seeds:
+  dialer_dw:
+    campaign_aliases:
+      +column_types:
+        is_test: boolean

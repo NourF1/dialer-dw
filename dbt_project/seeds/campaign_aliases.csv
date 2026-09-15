@@ -1,0 +1,7 @@
+campaign_alias,campaign_canonical,is_test,notes
+Aum Upadhyay - East,Aum Upadhyay,false,dialer splits campaign into East / East-West
+Aum Upadhyay - East/West,Aum Upadhyay,false,
+Medivox Home Health p2,Medivox Home Health,false,p2 = second list
+Medivox,Medivox Home Health,false,abbreviation
+Campaign 1,Campaign 1,true,test campaign
+Local Lead Outscraper Test,Local Lead Outscraper Test,true,test campaign

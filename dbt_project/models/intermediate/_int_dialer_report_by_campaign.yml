@@ -1,0 +1,34 @@
+version: 2
+
+models:
+  - name: int_dialer_report_by_campaign
+    description: >
+      Intermediate model aggregating daily ReadyMode dialer report metrics by canonical campaign.
+      Collapses split playlists (e.g., East / East-West variants) and recomputes all rate metrics from aggregated counts.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - _extraction_date
+            - queue
+            - campaign_name
+    columns:
+      - name: _extraction_date
+        tests:
+          - not_null
+
+      - name: queue
+        tests:
+          - not_null
+
+      - name: campaign_name
+        tests:
+          - not_null
+
+      - name: is_test
+        tests:
+          - not_null
+
+      - name: calls_to_connect
+        description: >
+          Aggregated total_calls ÷ connect_count. NULL when connect_count = 0 
+          (indicates 0 connects for the campaign/queue on that day, not missing data).

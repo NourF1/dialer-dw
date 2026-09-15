@@ -1,0 +1,26 @@
+version: 2
+
+seeds:
+  - name: campaign_aliases
+    description: >
+      Mapping seed to normalize ReadyMode playlist names to canonical campaign entities 
+      and flag test campaigns.
+    columns:
+      - name: campaign_alias
+        description: Primary key. Raw playlist name as output by ReadyMode.
+        tests:
+          - unique
+          - not_null
+
+      - name: campaign_canonical
+        description: Standardized campaign name across reports.
+        tests:
+          - not_null
+
+      - name: is_test
+        description: Boolean flag indicating if the campaign was an internal test.
+        tests:
+          - not_null
+
+      - name: notes
+        description: Context behind the alias mapping.

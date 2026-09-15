@@ -7,7 +7,7 @@ dialer_dw:
       project: "{{ env_var('GCP_PROJECT_ID') }}"
       dataset: "{{ env_var('DBT_DATASET', 'dialer_dw_dev') }}"
       keyfile: "{{ env_var('GCP_KEY_PATH') }}"
-      threads: 4
+      threads: 2   # 4+ intermittently hits RemoteDisconnected against BigQuery
       location: US
       priority: interactive
       job_retries: 1
@@ -17,7 +17,7 @@ dialer_dw:
       project: "{{ env_var('GCP_PROJECT_ID') }}"
       dataset: dialer_dw
       keyfile: "{{ env_var('GCP_KEY_PATH') }}"
-      threads: 8
+      threads: 4   # kept below dev's failure point
       location: US
       priority: interactive
       job_retries: 2
