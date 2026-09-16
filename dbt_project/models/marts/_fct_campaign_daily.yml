@@ -1,0 +1,58 @@
+version: 2
+
+models:
+  - name: fct_campaign_daily
+    description: >
+      Core daily campaign performance fact table combining ReadyMode dialer aggregate metrics 
+      with call log dispositions via FULL OUTER JOIN.
+      Grain: One row per (_extraction_date, campaign_name).
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - _extraction_date
+            - campaign_name
+    columns:
+      - name: _extraction_date
+        description: Pipeline extraction date.
+        tests:
+          - not_null
+
+      - name: campaign_name
+        description: Standardized canonical campaign name after seed aliasing.
+        tests:
+          - not_null
+
+      - name: has_dialer_data
+        description: Boolean flag indicating if dialer summary records exist for this day/campaign.
+        tests:
+          - not_null
+
+      - name: has_disposition_data
+        description: Boolean flag indicating if call log dispositions exist for this day/campaign.
+        tests:
+          - not_null
+
+      - name: is_test
+        description: Boolean flag identifying internal test campaigns.
+        tests:
+          - not_null
+
+      - name: total_calls
+        description: Total call count from dialer report.
+        tests:
+          - not_null
+
+      - name: disposition_count
+        description: Total call log count mapped to this campaign on this day.
+        tests:
+          - not_null
+
+      - name: qualified_lead_count
+        description: Total calls dispositioned as 'Qualified Lead'.
+        tests:
+          - not_null
+
+      - name: calls_per_qualified_lead
+        description: >
+          Total calls ÷ qualified leads. NULL when qualified_lead_count = 0 
+          (indicates no qualified leads generated, avoiding division by zero).
