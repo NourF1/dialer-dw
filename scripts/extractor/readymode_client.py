@@ -3,7 +3,7 @@
 Ported from the production ListKit client (readymode_http.py), with three
 deliberate changes for warehouse use:
   * base_url is a constructor argument, not a module constant
-  * network calls retry with exponential backoff        (chunk 3 — not yet added)
+  * network calls retry with exponential backoff
   * NO type coercion and NO row filtering — every row ReadyMode sends is
     returned, with every value as the string the source rendered. Casting
     and cleaning belong in dbt, where they are testable and reversible.
@@ -12,8 +12,7 @@ BOUNDARY: this module knows about HTTP and ReadyMode's HTML/CSV. It knows
 nothing about BigQuery, Airflow, or dbt. If you ever need to import
 google.cloud here, the boundary has been crossed.
 
-Build status: chunk 2 of 3 — authentication + fetchers.
-  TODO chunk 3: tenacity retries + schema-drift detection
+Build status: chunk 3 of 3 — authentication + fetchers + tenacity retries.
 """
 from __future__ import annotations
 
@@ -24,6 +23,12 @@ import re
 from datetime import date, timedelta
 
 import requests
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,14 +42,6 @@ CALL_RESULT_TYPES = ["6", "-2", "3", "141", "1", "2", "5", "7", "138", "139", "-
 # Exact export field keys for the "dispo" template, read from the live
 # ExportMenu (181 fields available). Keys for core call-log fields are the
 # label text itself; CCS_Profile.* keys are lead-profile attributes.
-#
-# DELIBERATELY EXCLUDED: every CCS_Profile.* field (phone, email, name,
-# address) and the Recording Local/Remote Phone fields. Those are real
-# consumers' PII belonging to a client, and none of the marts need them.
-#
-# Order defines CSV column order; rows are parsed by header name, so it is
-# cosmetic. "Log Time (Date)" is kept alongside "Log Time" for backward
-# compatibility with partitions loaded before 2026-09-14.
 DISPO_FIELDS = [
     ("Call Log ID", "Call Log ID"),                                # primary key
     ("Original campaign", "Original campaign"),
@@ -84,6 +81,18 @@ def _cells(row_html: str) -> list[str]:
             for c in re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", row_html, re.S)]
 
 
+# Tenacity decorator sizing: ~4 attempts, exponential backoff (min 2s, max 30s), total < 60s.
+# reraise=True ensures original exceptions (LoginError, ReadymodeFormatError, RequestException)
+# propagate directly without being wrapped in tenacity.RetryError.
+# retry_if_exception_type strictly target network/transport errors.
+_retry_network = retry(
+    reraise=True,
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=1, min=2, max=30),
+    retry=retry_if_exception_type(requests.RequestException),
+)
+
+
 class ReadymodeClient:
     """Authenticated HTTP client for a single ReadyMode tenant."""
 
@@ -95,6 +104,7 @@ class ReadymodeClient:
         self._password = password
         self._session: requests.Session | None = None
 
+    @_retry_network
     def login(self) -> None:
         """Authenticate and store a session, bumping any existing one.
 
@@ -130,17 +140,11 @@ class ReadymodeClient:
 
         # 3. ReadyMode allows ONE active session per user. A second login hits
         #    an interstitial; re-POST with logout_other_sessions to force it.
-        #    NOTE: this EVICTS the other session — see the scheduling warning
-        #    in the README before running this near liskit-daily-http's window.
         if "already logged in" in r.text.lower():
             forced = dict(form, login_as_admin="", logout_other_sessions="on")
             s.post(f"{self.base}/login_new/", data=forced, allow_redirects=True)
 
         # 4. Verify against page CONTENT, not the status code.
-        #    A FAILED login returns 200 OK with the login page in the body, so
-        #    raise_for_status() would sail straight past it and we would land an
-        #    empty partition and a silently empty fact table. Check for a marker
-        #    that only appears once actually authenticated.
         dash = s.get(f"{self.base}/")
         if "hotbar_logout" not in dash.text and "SIGN OUT" not in dash.text:
             raise LoginError(
@@ -161,6 +165,7 @@ class ReadymodeClient:
         if "login_account" in lowered or "login_password" in lowered:
             raise LoginError("Session expired or invalid — server returned login page instead of requested report.")
 
+    @_retry_network
     def fetch_call_log(self, day: date) -> list[dict]:
         """Fetch call log dispositions for `day`, returning raw list[dict]."""
         s = self._require_session()
@@ -197,7 +202,6 @@ class ReadymodeClient:
                 "The Call Log export endpoint or dispo field keys likely changed."
             )
 
-        # csv.DictReader preserves native structure/None values without string coercion
         rows = list(csv.DictReader(io.StringIO(r.text)))
         expected = {"Call Log ID", "Original campaign", "Log Type", "Log Time"}
         if rows and not expected.issubset(set(rows[0].keys())):
@@ -207,14 +211,9 @@ class ReadymodeClient:
 
         return rows
 
+    @_retry_network
     def fetch_dialer_report(self, day: date) -> list[dict]:
-        """Fetch per-campaign report for `day`, mapping all table columns by header name.
-
-        Lands all columns without value-based filtering. Drops rows strictly when
-        cell count does not match header count (structural mismatch) to prevent
-        misaligned columns. If no rows are present, returns an empty list to allow
-        zero-row partition loads.
-        """
+        """Fetch per-campaign report for `day`, mapping all table columns by header name."""
         s = self._require_session()
         d = _mmddyyyy(day)
         dialer = f"{self.base}/+CCS Reports/dialer"
@@ -249,12 +248,10 @@ class ReadymodeClient:
         structural_skips = 0
 
         for cells_row in rows[1:]:
-            # Structural Guard: Mismatched column count cannot be aligned safely
             if len(cells_row) != header_len:
                 structural_skips += 1
                 continue
 
-            # Map columns strictly by header name alignment
             row_dict = {col_name: cell_val for col_name, cell_val in zip(header, cells_row) if col_name}
             if row_dict:
                 out.append(row_dict)
@@ -267,7 +264,6 @@ class ReadymodeClient:
                 header_len,
             )
 
-        # Fail loudly if structural format corrupts all table rows
         if structural_skips > 0 and len(out) == 0:
             raise ReadymodeFormatError(
                 f"Dialer report table structural mismatch: all {structural_skips} data rows "
