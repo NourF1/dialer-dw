@@ -3,7 +3,7 @@ import logging
 import sys
 import uuid
 from datetime import date, datetime, timedelta, timezone
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from google.cloud import bigquery
 
@@ -26,7 +26,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("run_extract")
 
-# Source mapping dictionary: source -> (client_method_attr, raw_table_name, source_label)
 SOURCE_CONFIG = {
     "call_log": (
         "fetch_call_log",
@@ -43,12 +42,216 @@ SOURCE_CONFIG = {
 AVAILABLE_SOURCES = list(SOURCE_CONFIG.keys())
 
 
+class ExtractionError(Exception):
+    """Raised when one or more extraction units fail."""
+
+
 def daterange(start_date: date, end_date: date):
     """Generates dates sequentially inclusive of start_date and end_date."""
     curr = start_date
     while curr <= end_date:
         yield curr
         curr += timedelta(days=1)
+
+
+def run_extraction_for_date(
+    target_date: date,
+    source: Optional[str] = None,
+    backfill_to: Optional[date] = None,
+) -> None:
+    """Callable entry point for Airflow or programmatic execution.
+
+    Raises ExtractionError on failure to ensure Airflow tasks fail correctly.
+    """
+    config = Config.from_env()
+    batch_id = str(uuid.uuid4())
+    logger.info(f"Starting run. Batch ID: {batch_id}")
+
+    # Determine dates and sources
+    if backfill_to:
+        cutoff_date = date.today() - timedelta(days=60)
+        if target_date < cutoff_date:
+            logger.warning(
+                f"Backfill start date ({target_date}) precedes 60-day BigQuery partition expiry window ({cutoff_date})."
+            )
+        target_dates = list(daterange(target_date, backfill_to))
+    else:
+        target_dates = [target_date]
+
+    target_sources = [source] if source else AVAILABLE_SOURCES
+    units_to_run = [(d, src) for d in target_dates for src in target_sources]
+
+    successful_units: List[Tuple[date, str]] = []
+    failed_units: List[Tuple[date, str, str]] = []
+
+    client = ReadymodeClient(
+        config.readymode_url,
+        config.readymode_user,
+        config.readymode_password,
+    )
+    bq_client = bigquery.Client(project=config.gcp_project)
+
+    try:
+        logger.info("Logging in to ReadyMode...")
+        client.login()
+    except LoginError as err:
+        logger.critical(
+            f"Pre-execution login failed: {err}. Writing failure audit rows for all queued units."
+        )
+        now = datetime.now(timezone.utc)
+        for t_date, src in units_to_run:
+            _, _, source_label = SOURCE_CONFIG[src]
+            log_extraction_run(
+                client=bq_client,
+                project_id=config.gcp_project,
+                dataset_id=config.raw_dataset,
+                batch_id=batch_id,
+                source=source_label,
+                extraction_date=t_date,
+                row_count=None,
+                status="failed",
+                started_at=now,
+                finished_at=now,
+                error_type="LoginError",
+                error_message=f"Run aborted during pre-execution login: {err}",
+            )
+            failed_units.append((t_date, src, f"LoginError: {err}"))
+
+        print_summary(batch_id, units_to_run, successful_units, failed_units, aborted_early=True)
+        raise ExtractionError(f"Pre-execution login failed: {err}") from err
+
+    try:
+        for t_date, src in units_to_run:
+            started_at = datetime.now(timezone.utc)
+            date_str = t_date.isoformat()
+
+            method_name, raw_table, source_label = SOURCE_CONFIG[src]
+            table_id = f"{config.gcp_project}.{config.raw_dataset}.{raw_table}"
+            fetch_fn = getattr(client, method_name)
+
+            row_count: Optional[int] = None
+            status: str = "failed"
+            error_type: Optional[str] = None
+            error_message: Optional[str] = None
+            fatal_exception: Optional[Exception] = None
+
+            try:
+                rows = fetch_fn(t_date)
+                rows_fetched = len(rows)
+
+                rows_loaded = load_partition(
+                    client=bq_client,
+                    table_id=table_id,
+                    rows=rows,
+                    extraction_date=t_date,
+                    source=source_label,
+                    batch_id=batch_id,
+                )
+
+                row_count = rows_loaded
+                status = "success"
+                successful_units.append((t_date, src))
+
+            except (LoginError, RawTableMissingError) as fatal_err:
+                status = "failed"
+                error_type = type(fatal_err).__name__
+                error_message = str(fatal_err)
+                fatal_exception = fatal_err
+                failed_units.append((t_date, src, str(fatal_err)))
+
+            except ReadymodeFormatError as err:
+                status = "failed"
+                error_type = "ReadymodeFormatError"
+                error_message = str(err)
+                failed_units.append((t_date, src, str(err)))
+
+            except Exception as err:
+                status = "failed"
+                error_type = type(err).__name__
+                error_message = str(err)
+                failed_units.append((t_date, src, str(err)))
+
+            finally:
+                finished_at = datetime.now(timezone.utc)
+                duration = (finished_at - started_at).total_seconds()
+
+                log_extraction_run(
+                    client=bq_client,
+                    project_id=config.gcp_project,
+                    dataset_id=config.raw_dataset,
+                    batch_id=batch_id,
+                    source=source_label,
+                    extraction_date=t_date,
+                    row_count=row_count,
+                    status=status,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    error_type=error_type,
+                    error_message=error_message,
+                )
+
+                if status == "success":
+                    logger.info(
+                        f"source={src}, date={date_str}, rows_fetched={rows_fetched}, "
+                        f"rows_loaded={rows_loaded}, batch_id={batch_id}, duration_s={duration:.2f}"
+                    )
+                else:
+                    logger.error(
+                        f"Failed processing source={src} for date={date_str} after {duration:.2f}s "
+                        f"[{error_type}]: {error_message}"
+                    )
+
+            if fatal_exception:
+                raise fatal_exception
+
+    except (LoginError, RawTableMissingError) as err:
+        logger.critical(f"Critical pipeline error: {err}. Aborting execution.")
+        print_summary(batch_id, units_to_run, successful_units, failed_units, aborted_early=True)
+        raise ExtractionError(f"Fatal run error: {err}") from err
+
+    print_summary(batch_id, units_to_run, successful_units, failed_units, aborted_early=False)
+
+    if failed_units:
+        raise ExtractionError(f"Extraction completed with {len(failed_units)} failed unit(s).")
+
+    print("All tasks completed successfully.\n")
+
+
+def print_summary(
+    batch_id: str,
+    units_to_run: List[Tuple[date, str]],
+    successful_units: List[Tuple[date, str]],
+    failed_units: List[Tuple[date, str, str]],
+    aborted_early: bool = False,
+) -> None:
+    """Prints execution summary and retry commands to stdout."""
+    print("\n" + "=" * 60)
+    print("EXTRACTION SUMMARY" + (" (ABORTED EARLY)" if aborted_early else ""))
+    print("=" * 60)
+    print(f"Batch ID:              {batch_id}")
+    print(f"Total Units Scheduled: {len(units_to_run)}")
+    print(f"Successful:            {len(successful_units)}")
+    print(f"Failed:                {len(failed_units)}")
+
+    attempted_count = len(successful_units) + len(failed_units)
+    unattempted_count = len(units_to_run) - attempted_count
+    if unattempted_count > 0:
+        print(f"Unattempted (Aborted): {unattempted_count}")
+    if aborted_early and units_to_run:
+        print(f"Aborted after unit:    {attempted_count} of {len(units_to_run)}")
+
+    if failed_units:
+        print("\nFailed Units Breakdown:")
+        for f_date, f_src, reason in failed_units:
+            print(f"  - Date: {f_date.isoformat()} | Source: {f_src} | Reason: {reason}")
+
+        print("\nTo re-run ONLY failed units, execute the following commands:")
+        for f_date, f_src, _ in failed_units:
+            print(
+                f"  python -m extractor.run_extract --date {f_date.isoformat()} --source {f_src}"
+            )
+
+    print("=" * 60 + "\n")
 
 
 def parse_args():
@@ -81,9 +284,7 @@ def parse_args():
     args = parser.parse_args()
 
     if bool(args.backfill_from) != bool(args.backfill_to):
-        parser.error(
-            "Both --backfill-from and --backfill-to must be specified together."
-        )
+        parser.error("Both --backfill-from and --backfill-to must be specified together.")
 
     if args.backfill_from and args.backfill_from > args.backfill_to:
         parser.error("--backfill-from cannot be after --backfill-to.")
@@ -91,230 +292,23 @@ def parse_args():
     return args
 
 
-def print_summary(
-    batch_id: str,
-    units_to_run: List[Tuple[date, str]],
-    successful_units: List[Tuple[date, str]],
-    failed_units: List[Tuple[date, str, str]],
-    aborted_early: bool = False,
-) -> None:
-    """Prints execution summary and retry commands to stdout."""
-    print("\n" + "=" * 60)
-    print("EXTRACTION SUMMARY" + (" (ABORTED EARLY)" if aborted_early else ""))
-    print("=" * 60)
-    print(f"Batch ID:              {batch_id}")
-    print(f"Total Units Scheduled: {len(units_to_run)}")
-    print(f"Successful:            {len(successful_units)}")
-    print(f"Failed:                {len(failed_units)}")
-
-    attempted_count = len(successful_units) + len(failed_units)
-    unattempted_count = len(units_to_run) - attempted_count
-    if unattempted_count > 0:
-        print(f"Unattempted (Aborted): {unattempted_count}")
-    if aborted_early and units_to_run:
-        # Name where the run stopped so the arithmetic above is not confusing:
-        # "80 scheduled / 12 succeeded / 1 failed" leaves 67 rows unexplained.
-        print(f"Aborted after unit:    {attempted_count} of {len(units_to_run)}")
-
-    if failed_units:
-        print("\nFailed Units Breakdown:")
-        for f_date, f_src, reason in failed_units:
-            print(
-                f"  - Date: {f_date.isoformat()} | Source: {f_src} | Reason: {reason}"
-            )
-
-        print("\nTo re-run ONLY failed units, execute the following commands:")
-        for f_date, f_src, _ in failed_units:
-            print(
-                f"  python -m extractor.run_extract --date {f_date.isoformat()} --source {f_src}"
-            )
-
-    print("=" * 60 + "\n")
-
-
-def execute_extraction() -> int:
+def main() -> int:
     args = parse_args()
 
-    try:
-        config = Config.from_env()
-    except ConfigError as err:
-        logger.error(f"Configuration Initialization Failed: {err}")
-        return 1
-
-    batch_id = str(uuid.uuid4())
-    logger.info(f"Starting run. Batch ID: {batch_id}")
-
-    # Determine date list
-    if args.backfill_from and args.backfill_to:
-        cutoff_date = date.today() - timedelta(days=60)
-        if args.backfill_from < cutoff_date:
-            logger.warning(
-                f"Backfill start date ({args.backfill_from}) precedes the 60-day BigQuery partition expiry "
-                f"window ({cutoff_date}). Data older than 60 days may be auto-expired."
-            )
-        target_dates = list(daterange(args.backfill_from, args.backfill_to))
-    else:
-        target_dates = [args.date]
-
-    target_sources = [args.source] if args.source else AVAILABLE_SOURCES
-
-    units_to_run = [(d, src) for d in target_dates for src in target_sources]
-
-    successful_units: List[Tuple[date, str]] = []
-    failed_units: List[Tuple[date, str, str]] = []
-
-    # Instantiate clients
-    client = ReadymodeClient(
-        config.readymode_url,
-        config.readymode_user,
-        config.readymode_password,
-    )
-    bq_client = bigquery.Client(project=config.gcp_project)
+    start_date = args.backfill_from if args.backfill_from else args.date
+    backfill_to = args.backfill_to if args.backfill_from else None
 
     try:
-        logger.info("Logging in to ReadyMode...")
-        client.login()
-    except LoginError as err:
-        logger.critical(
-            f"Pre-execution login failed: {err}. Writing failure audit rows for all queued units."
+        run_extraction_for_date(
+            target_date=start_date,
+            source=args.source,
+            backfill_to=backfill_to,
         )
-        now = datetime.now(timezone.utc)
-        for target_date, source in units_to_run:
-            _, _, source_label = SOURCE_CONFIG[source]
-            log_extraction_run(
-                client=bq_client,
-                project_id=config.gcp_project,
-                dataset_id=config.raw_dataset,
-                batch_id=batch_id,
-                source=source_label,
-                extraction_date=target_date,
-                row_count=None,
-                status="failed",
-                started_at=now,
-                finished_at=now,
-                error_type="LoginError",
-                error_message=f"Run aborted during pre-execution login: {err}",
-            )
-            failed_units.append((target_date, source, f"LoginError: {err}"))
-
-        print_summary(batch_id, units_to_run, successful_units, failed_units, aborted_early=True)
+        return 0
+    except (ExtractionError, ConfigError) as err:
+        logger.error(f"Execution failed: {err}")
         return 1
-
-    try:
-        for target_date, source in units_to_run:
-            started_at = datetime.now(timezone.utc)
-            date_str = target_date.isoformat()
-
-            method_name, raw_table, source_label = SOURCE_CONFIG[source]
-            table_id = f"{config.gcp_project}.{config.raw_dataset}.{raw_table}"
-            fetch_fn = getattr(client, method_name)
-
-            row_count: int | None = None
-            status: str = "failed"
-            error_type: str | None = None
-            error_message: str | None = None
-            fatal_exception: Exception | None = None
-
-            try:
-                # 1. Extract from ReadyMode
-                rows = fetch_fn(target_date)
-                rows_fetched = len(rows)
-
-                # 2. Load into BigQuery raw layer
-                rows_loaded = load_partition(
-                    client=bq_client,
-                    table_id=table_id,
-                    rows=rows,
-                    extraction_date=target_date,
-                    source=source_label,
-                    batch_id=batch_id,
-                )
-
-                # Set verified loaded count on success
-                row_count = rows_loaded
-                status = "success"
-                successful_units.append((target_date, source))
-
-            except (LoginError, RawTableMissingError) as fatal_err:
-                # Captured rather than re-raised here purely for readability: the
-                # `finally` block below would run before a bare `raise` propagated
-                # anyway. Storing it makes the "audit first, then abort" order
-                # explicit at the point where the abort actually happens.
-                status = "failed"
-                error_type = type(fatal_err).__name__
-                error_message = str(fatal_err)
-                fatal_exception = fatal_err
-                failed_units.append((target_date, source, str(fatal_err)))
-
-            except ReadymodeFormatError as err:
-                status = "failed"
-                error_type = "ReadymodeFormatError"
-                error_message = str(err)
-                failed_units.append((target_date, source, str(err)))
-
-            except Exception as err:
-                status = "failed"
-                error_type = type(err).__name__
-                error_message = str(err)
-                failed_units.append((target_date, source, str(err)))
-
-            finally:
-                finished_at = datetime.now(timezone.utc)
-                duration = (finished_at - started_at).total_seconds()
-
-                # Audit log run attempt (row_count remains None on failure)
-                log_extraction_run(
-                    client=bq_client,
-                    project_id=config.gcp_project,
-                    dataset_id=config.raw_dataset,
-                    batch_id=batch_id,
-                    source=source_label,
-                    extraction_date=target_date,
-                    row_count=row_count,
-                    status=status,
-                    started_at=started_at,
-                    finished_at=finished_at,
-                    error_type=error_type,
-                    error_message=error_message,
-                )
-
-                if status == "success":
-                    logger.info(
-                        f"source={source}, date={date_str}, rows_fetched={rows_fetched}, "
-                        f"rows_loaded={rows_loaded}, batch_id={batch_id}, duration_s={duration:.2f}"
-                    )
-                else:
-                    logger.error(
-                        f"Failed processing source={source} for date={date_str} after {duration:.2f}s "
-                        f"[{error_type}]: {error_message}"
-                    )
-
-            # Abort only AFTER the finally block has written the audit row.
-            if fatal_exception:
-                raise fatal_exception
-
-    except LoginError as err:
-        logger.critical(
-            f"Login session invalidated mid-run: {err}. Aborting execution immediately."
-        )
-        print_summary(batch_id, units_to_run, successful_units, failed_units, aborted_early=True)
-        return 1
-    except RawTableMissingError as err:
-        logger.critical(
-            f"Target BigQuery raw table missing: {err}. Aborting execution immediately."
-        )
-        print_summary(batch_id, units_to_run, successful_units, failed_units, aborted_early=True)
-        return 1
-
-    # Normal Completion Summary
-    print_summary(batch_id, units_to_run, successful_units, failed_units, aborted_early=False)
-
-    if failed_units:
-        return 1
-
-    print("All tasks completed successfully.\n")
-    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(execute_extraction())
+    sys.exit(main())

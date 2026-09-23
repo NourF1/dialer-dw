@@ -79,7 +79,8 @@ def load_partition(
     # Wait for execution completion
     load_job.result()
 
-    # TODO: Implement run-level observability by writing batch metadata, row counts, 
-    # source names, and extraction dates into a dedicated `extraction_runs` audit table.
+    # Run-level observability lives in audit.log_extraction_run, called by
+    # run_extract — not here. This module loads one partition and reports the
+    # count; it does not know about batches, retries, or run status.
 
     return len(formatted_rows)

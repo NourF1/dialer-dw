@@ -1,0 +1,26 @@
+version: 2
+
+models:
+  - name: dim_agent
+    description: "Dimension for call agents derived from call logs. Type-1 dimension where history is overwritten by the most recent agent_name. Grain: one row per agent_login."
+    columns:
+      - name: agent_login
+        description: "Primary key. Unique stable login ID for the agent."
+        tests:
+          - unique
+          - not_null
+
+      - name: agent_name
+        description: "Most recently recorded name for the agent login (Type-1 overwrite)."
+        tests:
+          - not_null
+
+      - name: first_seen_date
+        description: "Earliest _extraction_date the agent login was seen in call logs."
+        tests:
+          - not_null
+
+      - name: last_seen_date
+        description: "Latest _extraction_date the agent login was seen in call logs."
+        tests:
+          - not_null

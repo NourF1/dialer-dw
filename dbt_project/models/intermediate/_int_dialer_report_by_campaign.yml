@@ -9,14 +9,9 @@ models:
       - dbt_utils.unique_combination_of_columns:
           combination_of_columns:
             - _extraction_date
-            - queue
             - campaign_name
     columns:
       - name: _extraction_date
-        tests:
-          - not_null
-
-      - name: queue
         tests:
           - not_null
 
@@ -31,4 +26,4 @@ models:
       - name: calls_to_connect
         description: >
           Aggregated total_calls ÷ connect_count. NULL when connect_count = 0 
-          (indicates 0 connects for the campaign/queue on that day, not missing data).
+          (indicates 0 connects for the campaign on that day, not missing data).

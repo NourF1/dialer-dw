@@ -35,6 +35,11 @@ logger = logging.getLogger(__name__)
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36")
 
+# (connect, read). Read bounds silence between bytes, not total duration.
+TIMEOUT_PAGE = (10, 30)      # small HTML: login form, dashboard
+TIMEOUT_REPORT = (10, 120)   # report POSTs — server does work before responding
+TIMEOUT_EXPORT = (10, 300)   # CSV export — can be large, streams
+
 # Call-result type ids that are checked by default on the Call Log report; sending
 # them all means the export covers every disposition.
 CALL_RESULT_TYPES = ["6", "-2", "3", "141", "1", "2", "5", "7", "138", "139", "-1"]
@@ -124,7 +129,7 @@ class ReadymodeClient:
 
         # 1. GET first — seeds the PHPSESSID cookie. POSTing without it means
         #    the server has no session to attach the login to.
-        s.get(f"{self.base}/login_new/")
+        s.get(f"{self.base}/login_new/", timeout=TIMEOUT_PAGE)
 
         # 2. The login form. The non-obvious fields were captured from the live
         #    UI; ReadyMode rejects the POST without them.
@@ -136,16 +141,16 @@ class ReadymodeClient:
             "login_account": self._user,
             "login_password": self._password,
         }
-        r = s.post(f"{self.base}/login_new/", data=form, allow_redirects=True)
+        r = s.post(f"{self.base}/login_new/", data=form, allow_redirects=True, timeout=TIMEOUT_PAGE)
 
         # 3. ReadyMode allows ONE active session per user. A second login hits
         #    an interstitial; re-POST with logout_other_sessions to force it.
         if "already logged in" in r.text.lower():
             forced = dict(form, login_as_admin="", logout_other_sessions="on")
-            s.post(f"{self.base}/login_new/", data=forced, allow_redirects=True)
+            s.post(f"{self.base}/login_new/", data=forced, allow_redirects=True, timeout=TIMEOUT_PAGE)
 
         # 4. Verify against page CONTENT, not the status code.
-        dash = s.get(f"{self.base}/")
+        dash = s.get(f"{self.base}/", timeout=TIMEOUT_PAGE)
         if "hotbar_logout" not in dash.text and "SIGN OUT" not in dash.text:
             raise LoginError(
                 "authentication failed — still on login page after force-login"
@@ -183,14 +188,14 @@ class ReadymodeClient:
             ("report[durationFilter]", "-1"), ("report[callTypeFilter]", "_"),
         ] + [("report[types][]", t) for t in CALL_RESULT_TYPES]
 
-        update_res = s.post(f"{self.base}/+CCS Reports/call_log/update", data=form, headers=xhr)
+        update_res = s.post(f"{self.base}/+CCS Reports/call_log/update", data=form, headers=xhr, timeout=TIMEOUT_REPORT)
         self._verify_session_alive(update_res.text)
 
         # 2) Stream the CSV export with the dispo fields.
         payload = [("fieldList[keys][]", k) for k, _ in DISPO_FIELDS] + \
                   [("fieldList[names][]", n) for _, n in DISPO_FIELDS]
         r = s.post(f"{self.base}/+CCS Reports/call_log/ExportMenu/CL.csv", data=payload,
-                   headers={"Referer": f"{self.base}/+CCS Reports/call_log"})
+                   headers={"Referer": f"{self.base}/+CCS Reports/call_log"}, timeout=TIMEOUT_EXPORT)
 
         self._verify_session_alive(r.text)
 
@@ -218,7 +223,7 @@ class ReadymodeClient:
         d = _mmddyyyy(day)
         dialer = f"{self.base}/+CCS Reports/dialer"
         r = s.post(dialer, data={"date_from": d, "date_to": d},
-                   headers={"X-Requested-With": "XMLHttpRequest", "Referer": dialer})
+                   headers={"X-Requested-With": "XMLHttpRequest", "Referer": dialer}, timeout=TIMEOUT_REPORT)
 
         self._verify_session_alive(r.text)
 

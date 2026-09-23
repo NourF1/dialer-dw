@@ -1,0 +1,19 @@
+{
+    "metadata": {
+      "dbt_schema_version": "https://schemas.getdbt.com/dbt/run-results/v6.json",
+      "dbt_version": "1.8.0"
+    },
+    "args": {
+      "target": "prod",
+      "which": "test",
+      "project_dir": "/opt/airflow/dbt_project"
+    },
+    "results": [
+      {
+        "status": "error",
+        "failures": null,
+        "unique_id": "model.dialer_dw.stg_calls",
+        "message": "Compilation Error in model stg_calls (models/staging/stg_calls.sql)\n  Database Error: column 'unmapped_campaign_id' does not exist"
+      }
+    ]
+  }

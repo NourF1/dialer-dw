@@ -1,0 +1,36 @@
+version: 2
+
+models:
+  - name: dim_campaign
+    description: "Conformed dimension for canonical campaign names derived directly from source staging tables and campaign alias seeds. Grain: one row per canonical campaign_name."
+    columns:
+      - name: campaign_name
+        description: "Primary key. The canonical name of the campaign after applying seed aliases."
+        tests:
+          - unique
+          - not_null
+
+      - name: is_test
+        description: "Flag indicating whether the campaign is a test campaign based on naming convention."
+        tests:
+          - not_null
+
+      - name: appears_in_dialer_report
+        description: "Boolean flag indicating whether this campaign appears in the dialer report staging model."
+        tests:
+          - not_null
+
+      - name: appears_in_call_log
+        description: "Boolean flag indicating whether this campaign appears in the call log staging model."
+        tests:
+          - not_null
+
+      - name: first_seen_date
+        description: "Earliest _extraction_date recorded for this campaign across all sources."
+        tests:
+          - not_null
+
+      - name: last_seen_date
+        description: "Latest _extraction_date recorded for this campaign across all sources."
+        tests:
+          - not_null

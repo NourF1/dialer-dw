@@ -21,6 +21,9 @@ models:
         description: Standardized canonical campaign name after seed aliasing.
         tests:
           - not_null
+          - relationships:
+              to: ref('dim_campaign')
+              field: campaign_name
 
       - name: has_dialer_data
         description: Boolean flag indicating if dialer summary records exist for this day/campaign.

@@ -1,0 +1,19 @@
+{
+    "metadata": {
+      "dbt_schema_version": "https://schemas.getdbt.com/dbt/run-results/v6.json",
+      "dbt_version": "1.8.0"
+    },
+    "args": {
+      "target": "prod",
+      "which": "test",
+      "project_dir": "/opt/airflow/dbt_project"
+    },
+    "results": [
+      {
+        "status": "fail",
+        "failures": 12,
+        "unique_id": "test.dialer_dw.not_null_campaigns_campaign_id.12345",
+        "message": "Got 12 results, configured to fail if != 0"
+      }
+    ]
+  }

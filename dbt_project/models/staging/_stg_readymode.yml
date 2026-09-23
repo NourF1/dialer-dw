@@ -49,6 +49,9 @@ models:
         description: Unique persistent identifier for the agent (e.g., E26031163).
         tests:
           - not_null
+          - relationships:
+              to: ref('dim_agent')
+              field: agent_login
 
       - name: agent_name
         description: Agent display name (e.g., Hany Emad).

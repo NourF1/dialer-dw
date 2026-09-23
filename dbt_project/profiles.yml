@@ -17,7 +17,7 @@ dialer_dw:
       project: "{{ env_var('GCP_PROJECT_ID') }}"
       dataset: dialer_dw
       keyfile: "{{ env_var('GCP_KEY_PATH') }}"
-      threads: 4   # kept below dev's failure point
+      threads: 1   # kept below dev's failure point
       location: US
       priority: interactive
       job_retries: 2

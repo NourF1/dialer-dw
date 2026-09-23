@@ -11,7 +11,6 @@ aliases as (
 joined as (
     select
         r._extraction_date,
-        r.queue,
         coalesce(a.campaign_canonical, r.playlist) as campaign_name,
         coalesce(a.is_test, false) as is_test,
 
@@ -31,9 +30,8 @@ joined as (
 aggregated as (
     select
         _extraction_date,
-        queue,
         campaign_name,
-        is_test,
+        logical_or(is_test) as is_test,
 
         -- Aggregate volume counts
         sum(total_calls) as total_calls,
@@ -53,9 +51,7 @@ aggregated as (
     from joined
     group by
         _extraction_date,
-        queue,
-        campaign_name,
-        is_test
+        campaign_name
 )
 
 select * from aggregated

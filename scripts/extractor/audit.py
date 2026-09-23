@@ -26,7 +26,7 @@ def log_extraction_run(
     batch_id: str,
     source: str,
     extraction_date: date,
-    row_count: int,
+    row_count: Optional[int],
     status: str,
     started_at: datetime,
     finished_at: datetime,
