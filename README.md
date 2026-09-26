@@ -22,9 +22,9 @@ with Airflow.
        │  session auth · tenacity retries · schema-drift detection
        ▼
   scripts/extractor/  ──►  dialer_dw_raw
-                             raw_call_log       104,599 rows / 39 days
-                             raw_dialer_report      579 rows / 39 days
-                             extraction_runs        213 rows  audit trail
+                             raw_call_log       106,412 rows / 40 days
+                             raw_dialer_report      591 rows / 40 days
+                             extraction_runs        219 rows  audit trail
                            payload = verbatim JSON, nothing cast
        │
        ▼  dbt source + freshness (2h warn / 6h error, post-load)
@@ -37,7 +37,7 @@ with Airflow.
        │
        ▼
   marts (table)
-       fct_campaign_daily              811 rows
+       fct_campaign_daily              854 rows
        dim_campaign                    134 rows   ← FK target for the fact
        dim_agent                       100 rows   ← FK target for staging
 
@@ -47,7 +47,7 @@ with Airflow.
                  └──► dbt_seed ──► dbt_run ──► dbt_test
 ```
 
-Data window: 2026-08-03 → 2026-09-22 — 39 weekday partitions, no gaps.
+Data window: 2026-08-03 → 2026-09-23 — 40 weekday partitions, no gaps.
 Weekend partitions are absent by design.
 
 ## Quickstart
@@ -90,13 +90,29 @@ dbt run --target prod    # prod — used only by the DAG
 
 ## Orchestration
 
-`airflow/dags/dialer_dw_daily.py`. Paused by default.
+`airflow/dags/dialer_dw_daily.py`.
+
+**`extract` is self-healing.** Rather than extracting only `{{ ds }}`, it asks
+`extraction_runs` which weekday dates in the last 45 days lack a successful row
+for *both* sources, and fills them — up to 10 per run, oldest first, in a single
+ReadyMode session. On a normal day that set is just `[ds]`, so the healing path
+and the ordinary path are the same code. On a weekend it is empty and the task
+no-ops.
+
+Why `extraction_runs` and not the raw tables: a weekend legitimately returns
+zero rows and writes no partition, so a raw-table check would see it as missing
+every run, forever. The audit table records a `success` with `row_count = 0`.
+
+The upper bound is `ds`, never `date.today()` — that keeps `extract` a function
+of its logical date, so re-running an old DagRun cannot reach forward into dates
+it does not own.
 
 | Setting | Value | Why |
 |---|---|---|
 | `schedule` | `0 6 * * *` **ET** | Every `{{ ds }}` is genuinely yesterday. 06:00 ET is clear of the 1 PM ET ReadyMode collision with the ListKit pipeline by seven hours, and is a DST-safe hour (the spring gap is 02:00-03:00, the fall overlap 01:00-02:00). |
 | `start_date` | static literal, `tz="America/New_York"` | The cron is interpreted in the `start_date`'s timezone, so the DAG follows ET across DST. A hardcoded UTC cron would drift an hour twice a year. A moving `start_date` (`days_ago`, `now()`) makes interval arithmetic non-deterministic. |
 | `catchup` | `False` | With `True`, unpausing queues ~47 runs, each calling `login()` — and each login force-evicts the previous session. |
+| `max_active_tasks` | `1` | Serializes tasks *within* a run. Without it Airflow ran `dbt_seed` and `dbt_source_freshness` concurrently, and two simultaneous dbt processes contending for auth turned a 7-row seed into an 18-minute task. See [Connection flakiness](#connection-flakiness). |
 | `max_active_runs` | `1` | ReadyMode allows one session per user, so the DAG must serialize itself. `catchup=False` alone doesn't stop a manual trigger overlapping. |
 | `dagrun_timeout` | 90 min | Otherwise one hung run holds the only slot forever and later days are silently skipped. Raised from 45 after two real runs (46.0 and 62.1 min) tripped it. |
 | `retries` / `retry_delay` | 2 / 5 min | Fresh task → fresh auth token. Outer net for a dead *process*. |
@@ -163,7 +179,9 @@ which compares fact against source **per date** and returns one row per failing
   integrity (`fct_campaign_daily.campaign_name` → `dim_campaign`, and
   `stg_readymode__call_log.agent_login` → `dim_agent`) and one singular
   reconciliation test asserting fact-to-source equality per date.
-- **7 pytest** in `scripts/dbt_retry/tests/` covering the retry classifier.
+- **14 pytest**: 7 in `scripts/dbt_retry/tests/` (retry classifier), 6 in
+  `scripts/extractor/tests/test_gap_finder.py` (gap detection), 1 partition
+  idempotency test against the live sandbox.
 - `scripts/extractor/tests/test_bq_loader.py` — partition idempotency against the
   live sandbox.
 
@@ -179,8 +197,13 @@ expected.
 
 ### Known gaps
 
-**None currently.** Weekend partitions are absent throughout, by design; all 37
-weekdays from 2026-08-03 to 2026-09-18 are present.
+**None currently**, and gaps now close themselves. All 40 weekdays from
+2026-08-03 to 2026-09-23 are present; weekend partitions are absent by design.
+
+`extract` fills any missing weekday within a 45-day lookback on its next run, so
+a day the pipeline sleeps through is recovered automatically rather than needing
+the manual backfill below. That command remains the tool for anything outside
+the lookback, or for deliberately re-extracting a day.
 
 Because `catchup=False`, the DAG will never fill a day it missed, so gaps are
 closed by hand with one login for the whole range:
@@ -207,6 +230,21 @@ against BigQuery itself. Measured evidence: `fct_campaign_daily` materialises
 took 40.65s. Execution time doesn't vary like that; connection setup does.
 
 Two mitigations, at different layers:
+
+0. **`max_active_tasks: 1`.** The DAG serializes its own tasks. Measured
+   2026-09-25 → 09-26, same work, only this changed:
+
+   ```
+   dbt_seed  1076s  (concurrent with dbt_source_freshness)
+   dbt_seed    23s  (serialized)              47x
+   run       117min  →  4min05
+   ```
+
+   `threads: 1` removed concurrency *inside* dbt; this removes it *between*
+   tasks. Both were needed. Note the fix is a DAG-level setting and **not** a
+   dependency edge — chaining `dbt_seed` behind `dbt_source_freshness` would put
+   the dbt chain downstream of `freshness_gate`, and the weekend short-circuit
+   would then skip the entire pipeline.
 
 1. **`prod` runs `threads: 1`.** At 4 every `dbt test` failed. The tell that it
    isn't a data problem: the failing test *name moves between attempts*, and
@@ -235,7 +273,7 @@ status=warn                              → not a failure
 
 ```
 airflow/dags/           dialer_dw_daily.py — the one DAG
-scripts/extractor/      ReadyMode client, BigQuery loader, audit, CLI
+scripts/extractor/      ReadyMode client, BigQuery loader, audit, gap finder, CLI
   tests/                pytest + clear_partitions.py maintenance tool
 scripts/dbt_retry/      transient-failure retry wrapper
   tests/                pytest + run_results.json fixtures
@@ -246,7 +284,7 @@ dbt_project/
   seeds/                campaign_aliases.csv — edit in a TEXT editor, not Numbers
   tests/                singular tests (warn_unmapped_campaigns.sql)
 config/raw_tables.sql   raw-layer DDL — run once, by hand, in the console
-docs/architecture/      diagrams (empty — Phase 5)
+docs/architecture/      lineage, DAG graph and resilience-layer diagrams
 keys/                   GCP service-account key (gitignored)
 ```
 
@@ -306,6 +344,14 @@ Deferred, worth knowing:
   re-invoking won't recover it.
 - **Run-level "Mark Failed" does not clear `NULL`-state task instances**, only
   `running`/`queued` ones. Mark those tasks individually, or delete the DagRun.
+- **Airflow is hosted on a laptop, deliberately.** Docker Desktop's VM suspends
+  when the Mac sleeps, so the scheduler does not fire and `catchup=False` means
+  a slept-through day is never created as a DagRun. Historically this is how
+  four weekdays went missing. Mitigated two ways: the self-healing `extract`
+  recovers gaps on the next run, and `sudo pmset repeat wakeorpoweron MTWRF
+  05:55:00` wakes the machine before the schedule. The production answer is a
+  always-on host or Cloud Composer; local hosting is a scoping choice for this
+  project, not an oversight.
 - **`ps` is not installed** in the Airflow image. To check for live processes,
   read `/proc/[0-9]*/cmdline` — an empty `ps` result is a broken probe, not an
   idle container.

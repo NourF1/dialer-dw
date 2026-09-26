@@ -58,6 +58,7 @@ def run_extraction_for_date(
     target_date: date,
     source: Optional[str] = None,
     backfill_to: Optional[date] = None,
+    target_dates: Optional[List[date]] = None,
 ) -> None:
     """Callable entry point for Airflow or programmatic execution.
 
@@ -68,7 +69,9 @@ def run_extraction_for_date(
     logger.info(f"Starting run. Batch ID: {batch_id}")
 
     # Determine dates and sources
-    if backfill_to:
+    if target_dates is not None:
+        pass  # Explicit list takes priority over calculated ranges
+    elif backfill_to:
         cutoff_date = date.today() - timedelta(days=60)
         if target_date < cutoff_date:
             logger.warning(

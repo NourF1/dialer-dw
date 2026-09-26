@@ -1,3 +1,4 @@
+import logging
 from datetime import date, timedelta
 import pendulum
 
@@ -5,15 +6,36 @@ from airflow import DAG
 from airflow.operators.bash import BashOperator
 from airflow.operators.python import PythonOperator, ShortCircuitOperator
 
+logger = logging.getLogger("airflow.task")
+
 
 def _extract(ds: str) -> None:
-    """Adapter function converting Airflow template string to python date object.
-    
-    Imported inside callable to keep DAG parsing lightweight.
+    """Adapter function finding missing weekday partitions up to ds and extracting them.
+
+    Imports modules inside callable to keep DAG parsing lightweight.
     """
+    from google.cloud import bigquery
+    from extractor.config import Config
+    from extractor.gap_finder import find_missing_dates
     from extractor.run_extract import run_extraction_for_date
 
-    run_extraction_for_date(target_date=date.fromisoformat(ds))
+    config = Config.from_env()
+    bq_client = bigquery.Client(project=config.gcp_project)
+    through = date.fromisoformat(ds)
+
+    missing = find_missing_dates(
+        client=bq_client,
+        project_id=config.gcp_project,
+        dataset_id=config.raw_dataset,
+        through_date=through,
+    )
+
+    if not missing:
+        logger.info("No gaps through %s; nothing to extract.", ds)
+        return
+
+    logger.info("Extracting %d date(s): %s", len(missing), missing)
+    run_extraction_for_date(target_date=missing[0], target_dates=missing)
 
 
 def _check_weekday_freshness(ds: str) -> bool:
@@ -23,17 +45,20 @@ def _check_weekday_freshness(ds: str) -> bool:
 
 default_args = {
     "owner": "airflow",
-    "retries": 2,
+    "retries": 4,
     "retry_delay": timedelta(minutes=5),
+    "retry_exponential_backoff": True,
+    "max_retry_delay": timedelta(minutes=30),
     "execution_timeout": timedelta(minutes=30),
 }
 
 with DAG(
     dag_id="dialer_dw_daily",
     start_date=pendulum.datetime(2026, 8, 1, tz="America/New_York"),
-    schedule="0 6 * * *",         
+    schedule="0 6 * * *",
     catchup=False,
     max_active_runs=1,
+    max_active_tasks=1,
     dagrun_timeout=timedelta(minutes=90),
     default_args=default_args,
     tags=["dialer", "bq", "dbt"],
