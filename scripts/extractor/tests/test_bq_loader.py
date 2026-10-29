@@ -1,8 +1,15 @@
 import uuid
 from datetime import date
 import pytest
-from google.cloud import bigquery
 
+# 1. Declare module-level integration marker
+pytestmark = pytest.mark.integration
+
+# 2. Guard BigQuery import first (this returns the module and binds it to `bigquery`)
+#    If google.cloud.bigquery is missing, pytest cleanly skips this test file here.
+bigquery = pytest.importorskip("google.cloud.bigquery")
+
+# 3. Import modules that depend on google.cloud AFTER importorskip
 from extractor.bq_loader import RawTableMissingError, load_partition
 
 # Sandbox test parameters
