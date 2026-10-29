@@ -1,5 +1,7 @@
 # dialer-dw
 
+[![CI](https://github.com/NourF1/dialer-dw/actions/workflows/ci.yml/badge.svg)](https://github.com/NourF1/dialer-dw/actions/workflows/ci.yml)
+
 An end-to-end analytics warehouse for outbound dialer operations: ReadyMode call
 data extracted over HTTP, landed in BigQuery, modeled with dbt, and orchestrated
 with Airflow.
@@ -14,6 +16,7 @@ with Airflow.
 | Transformation | dbt-bigquery 1.12 (staging → intermediate → marts) |
 | Data quality | dbt schema tests + source freshness on `_loaded_at` |
 | Resilience | `dbt_retry` wrapper — retries transient failures, never data failures |
+| CI | GitHub Actions — unit tests + `dbt build`, authenticated by Workload Identity Federation |
 
 ## Architecture
 
@@ -269,6 +272,49 @@ status=warn                              → not a failure
 > retried subset (`PASS=3`, not `PASS=50`) — judge success by exit code, not by
 > grepping a count.
 
+## Continuous integration
+
+`.github/workflows/ci.yml`, on every push and pull request to `main`.
+
+| Job | Runs | Needs credentials |
+|---|---|---|
+| `unit` | `pytest -m "not integration"` — 13 pure tests over the retry classifier and gap finder | no |
+| `warehouse` | `dbt build --target ci` — 6 models, 1 seed, 65 tests | yes |
+
+**Authentication is keyless.** GitHub Actions mints an OIDC token, GCP's Security
+Token Service exchanges it for a short-lived credential, and the runner
+impersonates a dedicated `dialer-dw-ci` service account. No service-account key
+is stored in the repository or in GitHub secrets — only the provider resource
+name and the SA email, neither of which is a credential.
+
+The Workload Identity provider carries an attribute condition pinning it to this
+repository:
+
+```
+--attribute-condition="assertion.repository=='NourF1/dialer-dw'"
+```
+
+Without that, the provider would trust *any* GitHub repository, and anyone could
+mint a token from their own Actions run and impersonate the service account.
+
+CI builds into its own `dialer_dw_ci_*` datasets via the `DBT_DATASET` env var,
+so it cannot collide with local `dialer_dw_dev_*` or with production.
+
+### What CI revealed
+
+```
+GitHub runner:  65 tests, threads: 4, 42.58s, 0 errors
+Local:          threads: 1 required, minutes, intermittent RemoteDisconnected
+```
+
+Same code, same warehouse, same queries. That is independent confirmation that
+the connection flakiness documented above is the local network path and not the
+project.
+
+`test_bq_loader.py` is marked `integration` and excluded from CI. It verifies
+partition idempotency by writing scratch partitions to **production** raw, which
+is acceptable as a local tool and not acceptable on every push.
+
 ## Repository layout
 
 ```
@@ -298,21 +344,12 @@ keys/                   GCP service-account key (gitignored)
       source freshness, warn-only unmapped-campaign check.
 - [x] **Phase 4 — Orchestration.** Airflow DAG, `dbt_retry` wrapper,
       `dim_campaign` / `dim_agent`, and enforced referential integrity.
-- [ ] **Phase 5 — Docs & CI.** Reconciliation test, architecture diagram, GitHub Actions.
+- [x] **Phase 5 — Docs & CI.** Reconciliation test, architecture diagrams, GitHub
+      Actions with keyless GCP auth.
 
 ### Where to pick up
 
-Phase 4 is complete and verified; the DAG is still **paused**.
-
-The one remaining step is to **unpause** it, after clearing any non-terminal task
-instances left from testing (see the operational notes below — run-level "Mark
-Failed" does not clear `NULL`-state tasks).
-
-Then Phase 5:
-
-1. ~~Reconciliation test~~ — done, `tests/assert_fct_reconciles_to_staging.sql`.
-2. **Architecture diagram** in `docs/architecture/`.
-3. **CI** — GitHub Actions running `pytest` and `dbt build` against `dev`.
+All five phases are complete. The pipeline ran unattended through 2026-10-25.
 
 Deferred, worth knowing:
 
